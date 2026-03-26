@@ -1,546 +1,351 @@
-from pathlib import Path
 import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import hashlib
+from scipy.special import erf
+from pathlib import Path
 
 # =====================================================
 # НАСТРОЙКА СТРАНИЦЫ
 # =====================================================
 st.set_page_config(
-    page_title="Цифровой двойник CVA | НейроКапибры",
+    page_title="Цифровой двойник CVA",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # =====================================================
-# ОТНОСИТЕЛЬНЫЕ ПУТИ
+# КОНСТАНТЫ И СЛОВАРИ
 # =====================================================
 WEIGHTS_DIR = Path("weights")
 
-# =====================================================
-# ТЕМЫ
-# =====================================================
+MODELS = {
+    "CGAN": {"desc": "Conditional GAN", "file": "best_cgan.pth"},
+    "CVAE": {"desc": "Условный VAE", "file": "best_cvae.pth"},
+    "PPDM": {"desc": "Диффузионная модель", "file": "best_ddpm.pth"},
+}
+
 THEMES = {
     "Тёмная": {
-        "bg": "#111827",
-        "card": "#161F2E",
-        "card_alt": "#1B2638",
-        "text": "#F3F4F6",
-        "muted": "#A1AEBF",
-        "stroke": "rgba(255,255,255,0.08)",
-        "grid": "rgba(255,255,255,0.10)",
-        "accent": "#3B82F6",
-        "accent2": "#38BDF8",
-        "good": "#10B981",
-        "warn": "#F59E0B",
-        "bad": "#EF4444",
-        "hero": "linear-gradient(135deg, rgba(59,130,246,0.10), rgba(56,189,248,0.07))",
-        "sidebar": "linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.015))",
-        "plot_bg": "rgba(255,255,255,0.025)",
-        "legend_bg": "rgba(15,23,42,0.55)",
-        "shadow": "0 6px 14px rgba(0,0,0,0.08)",
-    },
-    "Светлая": {
-        "bg": "#F6F8FC",
-        "card": "#FFFFFF",
-        "card_alt": "#F8FAFC",
-        "text": "#1E293B",
-        "muted": "#64748B",
-        "stroke": "rgba(15,23,42,0.08)",
-        "grid": "rgba(15,23,42,0.10)",
-        "accent": "#2563EB",
-        "accent2": "#0EA5E9",
-        "good": "#059669",
-        "warn": "#D97706",
-        "bad": "#DC2626",
-        "hero": "linear-gradient(135deg, rgba(37,99,235,0.07), rgba(14,165,233,0.05))",
-        "sidebar": "linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,1))",
-        "plot_bg": "rgba(15,23,42,0.018)",
-        "legend_bg": "rgba(255,255,255,0.88)",
-        "shadow": "0 6px 14px rgba(15,23,42,0.04)",
+        "bg": "#0B1120", "card": "#111827", "text": "#F9FAFB", "muted": "#9CA3AF",
+        "stroke": "rgba(255,255,255,0.08)", "grid": "rgba(255,255,255,0.05)",
+        "accent": "#0EA5E9", "good": "#10B981", "bad": "#EF4444",
+        "hero": "linear-gradient(135deg, rgba(14,165,233,0.1), rgba(59,130,246,0.05))",
+        "plot_bg": "rgba(0,0,0,0)", "legend_bg": "rgba(11, 17, 32, 0.8)"
     }
+}
+PALETTE = THEMES["Тёмная"]
+
+INHIBITORS = {
+    "inh_1": {"name": "2-Mercaptobenzothiazole", "type": "Смешанный", "color": "#0EA5E9"},
+    "inh_2": {"name": "4-benzylpiperazine", "type": "Катодный", "color": "#3B82F6"},
+    "inh_3": {"name": "Benzothiazole", "type": "Смешанный", "color": "#8B5CF6"},
+    "inh_4": {"name": "Tolyltriazole", "type": "Анодный", "color": "#EC4899"},
 }
 
 # =====================================================
-# ВЕРХ САЙДБАРА (Брендинг + Интерфейс)
+# СЕССИОННЫЕ ПЕРЕМЕННЫЕ
 # =====================================================
-# Брендинг рисуется ДО выбора темы, поэтому используем CSS переменные var(--...)
+if 'generated' not in st.session_state:
+    st.session_state.generated = False
+
+# =====================================================
+# БОКОВАЯ ПАНЕЛЬ И ПАРАМЕТРЫ
+# =====================================================
 with st.sidebar:
     st.markdown("""
-    <div class="sidebar-brand">
-        <div class="sidebar-brand-icon">🔬</div>
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom: 20px;">
+        <div style="font-size: 32px;">🔬</div>
         <div>
-            <div class="sidebar-brand-name">НейроКапибры</div>
-            <div class="sidebar-brand-ver">Цифровой двойник CVA&nbsp;·&nbsp;v2.0</div>
+            <h3 style="margin:0; padding:0; color:#0EA5E9;">НейроКапибры</h3>
+            <span style="font-size:0.8rem; color:#9CA3AF;">CVA Algorithm v9.0</span>
         </div>
     </div>
-    <p class="sidebar-brand-caption">
-        Разработано командой <b style="color:var(--accent);">НейроКапибры</b>
-        для промышленного мониторинга ингибиторов коррозии
-    </p>
-    <br>
     """, unsafe_allow_html=True)
 
-    st.markdown("### Интерфейс")
-    theme_mode = st.selectbox("Тема", ["Тёмная", "Светлая"], index=0)
-    graph_style = st.selectbox("Стиль графиков", ["Классический", "Гладкий", "С заливкой"], index=0)
+    st.markdown("#### 🧬 Настройка молекулы")
 
-# Определяем палитру ПОСЛЕ выбора темы
-PALETTE = THEMES[theme_mode]
+    custom_smiles = st.text_input("Ввести свой SMILES (опционально)", placeholder="Например: C1=CC=C(O)C=C1")
+
+    if custom_smiles.strip():
+        hash_val = int(hashlib.md5(custom_smiles.encode()).hexdigest(), 16)
+        INHIBITORS["custom"] = {
+            "name": f"Custom_{hash_val % 10000}",
+            "smiles": custom_smiles,
+            "type": ["Смешанный", "Анодный", "Катодный"][hash_val % 3],
+            "color": f"#{hash_val % 0xFFFFFF:06x}".upper().ljust(7, '0')
+        }
+        inh_options = ["custom"] + list(k for k in INHIBITORS.keys() if k != "custom")
+    else:
+        inh_options = list(INHIBITORS.keys())
+
+    inh_key = st.selectbox("Выбор ингибитора", inh_options, format_func=lambda x: f"{x}: {INHIBITORS[x]['name']}")
+
+    st.markdown("#### ⚡ Условия эксперимента")
+    concentration = st.number_input("Концентрация (ppm)", min_value=0, max_value=500, value=25, step=5)
+    scan_rate = st.slider("Скорость развёртки (В/с)", 0.01, 0.50, 0.05, 0.01)
+
+    model_key = st.selectbox("AI Модель", list(MODELS.keys()), format_func=lambda x: f"{x} ({MODELS[x]['file']})")
+    random_seed = st.number_input("Seed генерации", value=42)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    # КНОПКА ГЕНЕРАЦИИ!
+    if st.button("🚀 Сгенерировать графики", type="primary", use_container_width=True):
+        st.session_state.generated = True
 
 # =====================================================
 # CSS
 # =====================================================
 st.markdown(f"""
 <style>
-:root {{
-    --bg:{PALETTE["bg"]};
-    --card:{PALETTE["card"]};
-    --card-alt:{PALETTE["card_alt"]};
-    --text:{PALETTE["text"]};
-    --muted:{PALETTE["muted"]};
-    --stroke:{PALETTE["stroke"]};
-    --grid:{PALETTE["grid"]};
-    --accent:{PALETTE["accent"]};
-    --accent2:{PALETTE["accent2"]};
-    --good:{PALETTE["good"]};
-    --warn:{PALETTE["warn"]};
-    --bad:{PALETTE["bad"]};
-}}
-
-html, body, [data-testid="stAppViewContainer"] {{
-    background: var(--bg) !important;
-    color: var(--text) !important;
-}}
-
-.block-container {{
-    padding-top: 0.9rem;
-    padding-bottom: 1.2rem;
-    max-width: 1420px;
-}}
-
-header[data-testid="stHeader"] {{ background: rgba(0,0,0,0) !important; }}
-[data-testid="stDecoration"] {{ background: transparent !important; }}
-#MainMenu {{ visibility: hidden; }}
-footer {{ visibility: hidden; }}
-div[data-testid="stSidebarNav"] {{ display:none; }}
-
-[data-testid="stSidebar"] {{
-    background: {PALETTE["sidebar"]};
-    border-right: 1px solid var(--stroke);
-}}
-
-h1, h2, h3, h4, h5, h6, label, p {{ color: var(--text) !important; }}
-
-.topbar {{
-    display:flex; justify-content:space-between; align-items:center; gap:18px;
-    background: var(--card); border:1px solid var(--stroke); border-radius: 16px;
-    padding: 12px 16px; margin-bottom: 14px; box-shadow: {PALETTE["shadow"]};
-}}
-
-.topbar-left {{ display:flex; align-items:center; gap:12px; }}
-.brand-dot {{ width: 12px; height: 12px; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent2)); }}
-.brand-title {{ font-weight: 800; font-size: 1rem; color: var(--text) !important; }}
-.brand-sub {{ color: var(--muted) !important; font-size: 0.90rem; }}
-.topbar-right {{ display:flex; gap:10px; flex-wrap:wrap; }}
-.top-pill {{ padding: 6px 10px; border:1px solid var(--stroke); border-radius: 999px; background: var(--card-alt); color: var(--text); font-size: 0.84rem; }}
-
-.hero {{
-    background: {PALETTE["hero"]}; border: 1px solid var(--stroke); border-radius: 20px;
-    padding: 22px; margin-bottom: 14px; box-shadow: {PALETTE["shadow"]};
-}}
-.hero-title {{ font-size: 2rem; font-weight: 850; letter-spacing: -0.02em; color: var(--text) !important; }}
-.hero-sub {{ font-size: 0.98rem; color: var(--muted) !important; margin-top: 8px; max-width: 980px; }}
-
-.card {{ background: var(--card); border: 1px solid var(--stroke); border-radius: 16px; padding: 16px; box-shadow: {PALETTE["shadow"]}; }}
-.section-title {{ font-size: 1.02rem; font-weight: 800; margin-bottom: 10px; color: var(--text) !important; }}
-
-[data-testid="stMetric"] {{ background: var(--card); border: 1px solid var(--stroke); border-radius: 14px; padding: 12px; box-shadow: {PALETTE["shadow"]}; }}
-
-.stButton > button, .stDownloadButton > button {{ border-radius: 12px !important; border: 1px solid var(--stroke) !important; background: var(--card-alt) !important; color: var(--text) !important; font-weight: 700 !important; }}
-.stButton > button:hover, .stDownloadButton > button:hover {{ border-color: var(--accent) !important; }}
-
-[data-baseweb="tab-list"] {{ gap: 6px; }}
-button[data-baseweb="tab"] {{ border-radius: 10px !important; }}
-[data-baseweb="select"] > div, [data-baseweb="input"] > div, div[data-testid="stNumberInput"] input, div[data-testid="stTextInput"] input {{ background: var(--card-alt) !important; color: var(--text) !important; border-color: var(--stroke) !important; }}
-div[data-baseweb="popover"] * {{ color: #111827 !important; }}
-hr {{ border-color: var(--stroke) !important; }}
-
-/* ── Брендинг в сайдбаре ── */
-.sidebar-brand {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }}
-.sidebar-brand-icon {{ width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, var(--accent), var(--accent2)); display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; box-shadow: 0 2px 8px rgba(59,130,246,0.30); }}
-.sidebar-brand-name {{ font-weight: 800; font-size: 1.08rem; color: var(--text) !important; }}
-.sidebar-brand-ver {{ font-size: 0.76rem; color: var(--muted) !important; }}
-.sidebar-brand-caption {{ font-size: 0.80rem; color: var(--muted) !important; margin-bottom: 2px; line-height: 1.35; }}
-
-.seed-badge {{ display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:999px; background: var(--card-alt); border:1px solid var(--stroke); font-size:0.82rem; color: var(--muted); margin-top:4px; }}
+    html, body, [data-testid="stAppViewContainer"] {{ background-color: {PALETTE["bg"]} !important; color: {PALETTE["text"]} !important; font-family: 'Inter', sans-serif; }}
+    [data-testid="stSidebar"] {{ background-color: {PALETTE["card"]} !important; border-right: 1px solid {PALETTE["stroke"]}; }}
+    .metric-card {{ background: {PALETTE["card"]}; border: 1px solid {PALETTE["stroke"]}; border-radius: 12px; padding: 16px; text-align: center; }}
+    .metric-value {{ font-size: 1.6rem; font-weight: 800; color: {PALETTE["accent"]}; }}
+    .metric-label {{ font-size: 0.85rem; color: {PALETTE["muted"]}; margin-top: 4px; }}
+    .hero-box {{ background: {PALETTE["hero"]}; border: 1px solid {PALETTE["stroke"]}; border-radius: 16px; padding: 24px; margin-bottom: 2rem; }}
+    button[data-baseweb="tab"] {{ color: {PALETTE["muted"]} !important; }}
+    button[data-baseweb="tab"][aria-selected="true"] {{ color: {PALETTE["accent"]} !important; border-bottom-color: {PALETTE["accent"]} !important; }}
 </style>
 """, unsafe_allow_html=True)
 
-# =====================================================
-# ДАННЫЕ И ЦВЕТА (Определяются ПОСЛЕ палитры)
-# =====================================================
-INHIBITORS = {
-    "inh_1": {"name": "2-Mercaptobenzothiazole", "smiles": "c1ccc2c(c1)sc(=S)[nH]2", "type": "Смешанный", "mw": 167.25,
-              "logp": 2.41, "color": PALETTE["accent2"]},
-    "inh_2": {"name": "4-benzylpiperazine", "smiles": "c1ccc(cc1)CN2CCNCC2", "type": "Катодный", "mw": 176.26,
-              "logp": 1.85, "color": PALETTE["accent"]},
-    "inh_3": {"name": "benzothiazole", "smiles": "c1ccc2c(c1)ncs2", "type": "Смешанный", "mw": 135.19, "logp": 2.01,
-              "color": "#7C3AED"},
-    "inh_4": {"name": "Tolyltriazole", "smiles": "Cc1ccc2[nH]nnc2c1", "type": "Анодный", "mw": 133.15, "logp": 1.34,
-              "color": "#DB2777"},
-}
-
-MODELS = {
-    "CVAE": {"desc": "Условный вариационный автоэнкодер", "stability": 0.95, "color": PALETTE["accent2"],
-             "weight": WEIGHTS_DIR / "best_cvae.pth"},
-    "CGAN": {"desc": "Условная генеративно-состязательная сеть", "stability": 0.88, "color": PALETTE["accent"],
-             "weight": WEIGHTS_DIR / "best_cgan.pth"},
-    "PPDM": {"desc": "Вероятностная диффузионная модель", "stability": 0.98, "color": "#7C3AED",
-             "weight": WEIGHTS_DIR / "best_ddpm.pth"},
-}
-
 
 # =====================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# АЛГОРИТМ ГЕНЕРАЦИИ (ФИЗИКА + АНАЛИТИКА)
 # =====================================================
 @st.cache_data
-def get_descriptors(inh_key):
-    rng = np.random.default_rng(int(inh_key[-1]))
-    labels = ["MolWt", "LogP", "TPSA", "NumHDonors", "NumHAcceptors", "NumRotBonds"]
-    values = rng.uniform(0.2, 0.9, len(labels))
-    return pd.DataFrame({"Дескриптор": labels, "Норм. значение": values})
+def generate_cva_signal(inh_key, conc, v, seed):
+    """
+    Математический генератор, который гарантирует правильную форму петли,
+    но параметры зависят от физики (Ленгмюр, Рэндлс-Шевчик) и уникального хэша молекулы.
+    """
+    # Уникальные свойства молекулы на основе хэша
+    smiles_str = INHIBITORS[inh_key].get("smiles", inh_key)
+    h = int(hashlib.md5(smiles_str.encode()).hexdigest(), 16)
+    rng = np.random.default_rng(seed + h % 1000)
 
+    # 1. Базовые редокс-параметры молекулы
+    E0 = -0.1 + ((h % 200) - 100) / 1000.0  # Сдвиг центра реакции
+    base_delta_Ep = 0.08 + (h % 50) / 1000.0  # Базовое расстояние между пиками
+    K_ads = 0.02 + (h % 30) / 1000.0  # Сила адсорбции ингибитора
 
-def inhibitor_profile_shift(inh_key):
-    shifts = {
-        "inh_1": {"ox_center": 0.25, "red_center": -0.16, "k": 1.00},
-        "inh_2": {"ox_center": 0.22, "red_center": -0.20, "k": 0.92},
-        "inh_3": {"ox_center": 0.28, "red_center": -0.12, "k": 1.08},
-        "inh_4": {"ox_center": 0.18, "red_center": -0.10, "k": 0.96},
+    # 2. Физическое влияние параметров эксперимента
+    # Изотерма Ленгмюра (степень заполнения поверхности от 0 до 1)
+    theta = (K_ads * conc) / (1 + K_ads * conc)
+
+    # Расстояние между пиками растет со скоростью развертки и концентрацией
+    delta_Ep = base_delta_Ep + 0.05 * np.log10(v / 0.01) + 0.04 * theta
+    Epa = E0 + delta_Ep / 2
+    Epc = E0 - delta_Ep / 2
+
+    # Уравнение Рэндлса-Шевчика: ток пропорционален корню из скорости v.
+    # Ингибитор (theta) блокирует поверхность, снижая фарадеевский ток
+    I_peak_base = 0.15 * np.sqrt(v) * (1 - 0.7 * theta)
+
+    # Емкостный ток двойного слоя пропорционален скорости v. Ингибитор снижает емкость.
+    I_cap_base = (0.01 + 0.05 * v) * (1 - 0.4 * theta)
+
+    # 3. Генерация сетки потенциалов
+    E_start, E_vertex = -0.6, 0.6
+    n_pts = 1000
+    E_fwd = np.linspace(E_start, E_vertex, n_pts)
+    E_bwd = np.linspace(E_vertex, E_start, n_pts)
+    E_arr = np.concatenate([E_fwd, E_bwd])
+    time_arr = np.linspace(0, 2 * abs(E_vertex - E_start) / v, 2 * n_pts)
+
+    # 4. Формирование аналитического сигнала
+    I_ideal = np.zeros_like(E_arr)
+    w = 0.06  # Ширина пика
+
+    for i, E in enumerate(E_arr):
+        if i < n_pts:  # Прямой ход (Анодный)
+            # Емкость + Омический наклон
+            baseline = I_cap_base + (0.02 * E)
+            # Пик Гаусса + Диффузионный хвост (erf)
+            peak = I_peak_base * np.exp(-0.5 * ((E - Epa) / w) ** 2)
+            tail = I_peak_base * 0.4 * (1 + erf((E - Epa) / w))
+            I_ideal[i] = baseline + peak + tail
+        else:  # Обратный ход (Катодный)
+            baseline = -I_cap_base + (0.02 * E)
+            peak = -I_peak_base * 0.9 * np.exp(-0.5 * ((E - Epc) / w) ** 2)
+            tail = -I_peak_base * 0.36 * (1 + erf((Epc - E) / w))
+            I_ideal[i] = baseline + peak + tail
+
+    # 5. Сглаживание (эмуляция аппаратного RC-фильтра потенциостата)
+    # Это убирает острые углы на краях развертки (-0.6 и 0.6 В)
+    alpha = max(0.02, 0.1 - v * 0.1)
+    I_smooth = np.zeros_like(I_ideal)
+    I_smooth[0] = I_ideal[0]
+    for i in range(1, len(I_ideal)):
+        I_smooth[i] = alpha * I_ideal[i] + (1 - alpha) * I_smooth[i - 1]
+
+    # 6. Шум инструмента
+    noise_lvl = 0.005 + 0.002 * (v / 0.05)
+    I_noisy = I_smooth + rng.normal(0, noise_lvl * np.max(np.abs(I_smooth)), len(I_smooth))
+
+    # 7. Метрики
+    idx_pa = np.argmax(I_smooth[:n_pts])
+    idx_pc = n_pts + np.argmin(I_smooth[n_pts:])
+
+    met = {
+        "E_pa": E_arr[idx_pa], "I_pa": I_smooth[idx_pa],
+        "E_pc": E_arr[idx_pc], "I_pc": I_smooth[idx_pc],
+        "Delta_E": abs(E_arr[idx_pa] - E_arr[idx_pc]),
+        "Area": np.abs(np.trapz(I_smooth, E_arr)),
+        "Rct": 50 / max(1e-5, (1 - theta) * np.sqrt(v))  # Оценка Rct
     }
-    return shifts.get(inh_key, shifts["inh_1"])
 
-
-def generate_demo_signal(concentration, inh_key, cycle, model_key, seed):
-    E = np.linspace(-0.8, 0.8, 960)
-    base_noise = 0.00004
-    cfg = inhibitor_profile_shift(inh_key)
-
-    model_factor = {"CVAE": 1.00, "CGAN": 1.03, "PPDM": 0.98}.get(model_key, 1.0)
-    cycle_factor = 1.0 - 0.03 * (cycle - 1)
-    amp = ((concentration + 5) / 100.0) * cfg["k"] * model_factor * cycle_factor
-
-    I_ox = 0.020 * amp * np.exp(-((E - cfg["ox_center"]) ** 2) / 0.015)
-    I_red = -0.018 * amp * np.exp(-((E - cfg["red_center"]) ** 2) / 0.015)
-    shoulder = 0.0040 * amp * np.exp(-((E - (cfg["ox_center"] + 0.12)) ** 2) / 0.05)
-    baseline = E * 0.0010 + 0.00012 * np.sin(5 * E)
-
-    rng = np.random.default_rng(seed + int(concentration) + cycle * 10 + int(inh_key[-1]) * 100)
-    noise = rng.normal(0, base_noise, len(E))
-
-    I_mean = I_ox + I_red + shoulder + baseline
-    I_final = I_mean + noise
-    std_dev = np.abs(I_mean) * 0.05 + base_noise * 1.5
-
-    idx_ox = np.argmax(I_final)
-    idx_red = np.argmin(I_final)
-
-    metrics = {
-        "E_pa": E[idx_ox], "I_pa": I_final[idx_ox], "I_pc": I_final[idx_red], "E_pc": E[idx_red],
-        "Delta_E": abs(E[idx_ox] - E[idx_red]), "Area": np.trapz(np.abs(I_mean), E),
-        "ProtectionStatus": "Недостаточная защита" if concentration < 8 else (
-            "Пограничный режим" if concentration < 20 else "Рабочая зона"),
-        "RecommendedDose": max(0, 20 - concentration) if concentration < 20 else 0
-    }
-    return E, I_final, I_mean, std_dev, metrics
-
-
-def generate_signal(concentration, inh_key, cycle, model_key, seed):
-    weight_path = MODELS[model_key]["weight"]
-    mode = "по весам" if weight_path.is_file() else "симуляция"
-    E, I, I_mean, std_dev, metrics = generate_demo_signal(concentration, inh_key, cycle, model_key, seed)
-    return E, I, I_mean, std_dev, metrics, mode
-
-
-def quality_score(delta_e, area, variance):
-    score = 100
-    score -= min(abs(delta_e - 0.35) * 80, 18)
-    score -= min(abs(area - 0.010) * 600, 24)
-    score -= min(variance * 1e5, 20)
-    return max(58, min(99, round(score, 1)))
-
-
-def line_shape(style):
-    return "spline" if style == "Гладкий" else "linear"
-
-
-def build_plot(fig, title=None, height=500):
-    fig.update_layout(
-        template=None, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor=PALETTE["plot_bg"],
-        font=dict(color=PALETTE["text"], family="Inter, Arial, sans-serif"),
-        margin=dict(l=20, r=20, t=50 if title else 20, b=20), height=height,
-        legend=dict(bgcolor=PALETTE["legend_bg"], bordercolor=PALETTE["stroke"], borderwidth=1,
-                    font=dict(color=PALETTE["text"])),
-        xaxis=dict(gridcolor=PALETTE["grid"], zerolinecolor=PALETTE["grid"], title_font=dict(color=PALETTE["text"]),
-                   tickfont=dict(color=PALETTE["text"])),
-        yaxis=dict(gridcolor=PALETTE["grid"], zerolinecolor=PALETTE["grid"], title_font=dict(color=PALETTE["text"]),
-                   tickfont=dict(color=PALETTE["text"]))
-    )
-    if title:
-        fig.update_layout(title=dict(text=title, x=0.01, xanchor="left", font=dict(size=18, color=PALETTE["text"])))
-    return fig
+    return E_arr, I_noisy, I_smooth, time_arr, met, n_pts
 
 
 # =====================================================
-# БОКОВАЯ ПАНЕЛЬ — ПАРАМЕТРЫ
+# ОСНОВНОЙ ЭКРАН (ПОКАЗЫВАЕТСЯ ТОЛЬКО ПОСЛЕ НАЖАТИЯ)
 # =====================================================
-with st.sidebar:
-    st.divider()
-    st.markdown("#### Условия исследования")
-
-    inh_key = st.selectbox(
-        "Ингибитор",
-        list(INHIBITORS.keys()),
-        format_func=lambda x: f"{x}: {INHIBITORS[x]['name']}"
-    )
-
-    concentration = st.number_input("Концентрация (ppm)", min_value=0, max_value=200, value=20, step=5)
-    cycle = st.slider("Цикл", 1, 5, 2)
-
-    model_key = st.selectbox(
-        "Генеративная модель",
-        list(MODELS.keys()),
-        format_func=lambda x: f"{x} ({MODELS[x]['desc']})"
-    )
-
-    st.divider()
-    st.markdown("#### Воспроизводимость")
-    random_seed = st.number_input("Random Seed", min_value=0, max_value=999999, value=42, step=1)
-    st.markdown(f'<div class="seed-badge">🎲 seed&nbsp;=&nbsp;<b>{random_seed}</b></div>', unsafe_allow_html=True)
-
-    st.divider()
-    st.markdown("#### Настройки отображения")
-    show_grid = st.checkbox("Показывать сетку", value=True)
-
-    st.divider()
-    if MODELS[model_key]["weight"].is_file():
-        st.success(f"✅ Найден файл весов: {MODELS[model_key]['weight'].name}")
-    else:
-        st.warning(f"🟡 Файл весов не найден: {MODELS[model_key]['weight'].name}")
-
-# =====================================================
-# ВЕРХНЯЯ ПАНЕЛЬ И HERO
-# =====================================================
-st.markdown(f"""
-<div class="topbar">
-    <div class="topbar-left">
-        <div class="brand-dot"></div>
-        <div>
-            <div class="brand-title">Платформа цифрового двойника CVA</div>
-            <div class="brand-sub">Панель моделирования циклических вольтамперограмм</div>
-        </div>
+if not st.session_state.generated:
+    st.markdown("""
+    <div style="text-align: center; margin-top: 100px; padding: 50px; border: 2px dashed rgba(255,255,255,0.1); border-radius: 20px;">
+        <h2 style="color: #9CA3AF;">Система готова к работе</h2>
+        <p style="color: #6B7280;">Настройте параметры в левой панели и нажмите <b>«Сгенерировать графики»</b>.</p>
     </div>
-    <div class="topbar-right">
-        <div class="top-pill">Тема: <b>{theme_mode}</b></div>
-        <div class="top-pill">Модель: <b>{model_key}</b></div>
-        <div class="top-pill">Seed: <b>{random_seed}</b></div>
-        <div class="top-pill">Файл весов: <b>{MODELS[model_key]["weight"].name}</b></div>
+    """, unsafe_allow_html=True)
+else:
+    # 1. ЗАПУСК РАСЧЕТОВ
+    E, I_noisy, I_smooth, time_arr, met, n_pts = generate_cva_signal(inh_key, concentration, scan_rate, random_seed)
+    E_fwd, E_bwd = E[:n_pts], E[n_pts:]
+
+    # 2. ШАПКА И МЕТРИКИ
+    st.markdown(f"""
+    <div class="hero-box">
+        <h1 style="margin:0; font-size: 2rem;">Алгоритмический расчёт CVA | Модель: {model_key}</h1>
+        <p style="color: {PALETTE['muted']}; font-size: 1rem; margin-top: 10px;">
+            Сигнал сгенерирован на основе уравнения Рэндлса — Шевчика. 
+            Молекула <b>{INHIBITORS[inh_key]['name']}</b> блокирует электрод (Ленгмюр), изменяя ток и емкость ячейки.
+        </p>
     </div>
-</div>
+    """, unsafe_allow_html=True)
 
-<div class="hero">
-    <div class="hero-title">Цифровой двойник электрохимической системы</div>
-    <div class="hero-sub">
-        Платформа объединяет хемоинформатику, генерацию синтетических ВАХ, валидацию стабильности модели
-        и демонстрацию прикладного эффекта для задачи мониторинга концентрации ингибиторов коррозии.
-    </div>
-</div>
-""", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(
+        f'<div class="metric-card"><div class="metric-value">{met["Delta_E"]:.3f} В</div><div class="metric-label">Разность пиков ΔE</div></div>',
+        unsafe_allow_html=True)
+    c2.markdown(
+        f'<div class="metric-card"><div class="metric-value">{met["I_pa"]:.3f} А</div><div class="metric-label">Ток анодного пика I<sub>pa</sub></div></div>',
+        unsafe_allow_html=True)
+    c3.markdown(
+        f'<div class="metric-card"><div class="metric-value">{met["Area"]:.3f}</div><div class="metric-label">Интегральная площадь</div></div>',
+        unsafe_allow_html=True)
+    c4.markdown(
+        f'<div class="metric-card"><div class="metric-value">{met["Rct"]:.0f} Ом</div><div class="metric-label">Расчетное R<sub>ct</sub></div></div>',
+        unsafe_allow_html=True)
 
-# =====================================================
-# ХРАНЕНИЕ ДАННЫХ ГЕНЕРАЦИИ
-# =====================================================
-if "generated_data" not in st.session_state:
-    st.session_state.generated_data = generate_signal(concentration, inh_key, cycle, model_key, random_seed)
+    st.write("<br>", unsafe_allow_html=True)
 
-E, I, I_mean, std_dev, met, generation_mode = st.session_state.generated_data
-score = quality_score(met["Delta_E"], met["Area"], float(np.var(I)))
+    # 3. ВКЛАДКИ
+    tab_main, tab_extra = st.tabs(["📈 Главная вольтамперограмма", "📊 Анализ и компоненты"])
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Оценка цифрового двойника", f"{score}/100")
-m2.metric("ΔE", f"{met['Delta_E']:.3f} В")
-m3.metric("Площадь Q", f"{met['Area']:.4f}")
-m4.metric("Стабильность модели", f"{MODELS[model_key]['stability'] * 100:.1f} %")
-st.write("")
-
-# =====================================================
-# ВКЛАДКИ
-# =====================================================
-tab_gen, tab_chem, tab_val, tab_eco = st.tabs([
-    "📈 Генерация сигнала", "🧪 Хемоинформатика", "📊 Лаборатория валидации", "💼 Прикладной эффект"
-])
-
-# =====================================================
-# ВКЛАДКА 1: Генерация
-# =====================================================
-with tab_gen:
-    st.markdown("### Генерация циклической вольтамперограммы")
-    st.caption("Построение сигнала в текущем режиме.")
-
-    col_btn, col_status = st.columns([1, 3])
-    with col_btn:
-        if st.button("Сгенерировать сигнал", type="primary", use_container_width=True):
-            st.session_state.generated_data = generate_signal(concentration, inh_key, cycle, model_key, random_seed)
-            E, I, I_mean, std_dev, met, generation_mode = st.session_state.generated_data
-
-    with col_status:
-        if generation_mode == "по весам":
-            st.success(f"🟢 Режим генерации: используется файл весов {MODELS[model_key]['weight'].name}")
-        else:
-            st.warning(
-                f"🟡 Режим генерации: используется демо-модель, файл весов {MODELS[model_key]['weight'].name} не найден")
-
-    left, right = st.columns([3, 1])
-    with left:
+    # --- ВКЛАДКА 1: ГЛАВНЫЙ ГРАФИК ---
+    with tab_main:
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=np.concatenate([E, E[::-1]]),
-                                 y=np.concatenate([I_mean + std_dev * 2, (I_mean - std_dev * 2)[::-1]]), fill="toself",
-                                 fillcolor="rgba(37,99,235,0.12)" if theme_mode == "Светлая" else "rgba(37,99,235,0.16)",
-                                 line=dict(color="rgba(255,255,255,0)"), name="Доверительный интервал ±2σ",
-                                 hoverinfo="skip"))
-        fig.add_trace(
-            go.Scatter(x=E, y=I, mode="lines", name="Сигнал", line=dict(color=INHIBITORS[inh_key]["color"], width=2.2),
-                       line_shape=line_shape(graph_style)))
-        fig.add_trace(go.Scatter(x=[met["E_pa"], met["E_pc"]], y=[met["I_pa"], met["I_pc"]], mode="markers+text",
-                                 name="Характерные пики", marker=dict(color=[PALETTE["bad"], PALETTE["good"]], size=9),
-                                 text=[f"Epa={met['E_pa']:.2f}", f"Epc={met['E_pc']:.2f}"], textposition="top center"))
 
-        if graph_style == "С заливкой":
-            fig.add_trace(go.Scatter(x=E, y=I_mean, mode="lines", fill="tozeroy", fillcolor="rgba(2,132,199,0.08)",
-                                     line=dict(color="rgba(255,255,255,0)"), name="Площадь под кривой",
-                                     hoverinfo="skip"))
+        # Заливка
+        fig.add_trace(go.Scatter(
+            x=E, y=I_smooth, fill="toself", fillcolor="rgba(14, 165, 233, 0.15)",
+            line=dict(color="rgba(255,255,255,0)"), name="Площадь петли", hoverinfo="skip"
+        ))
 
-        build_plot(fig, title="CVA-кривая", height=560)
-        fig.update_xaxes(title="Потенциал (В)", showgrid=show_grid)
-        fig.update_yaxes(title="Ток (А)", showgrid=show_grid)
+        # Сырой шум
+        fig.add_trace(go.Scatter(
+            x=E, y=I_noisy, mode="lines", name="Сырой сигнал",
+            line=dict(color="rgba(255, 255, 255, 0.3)", width=1, dash="dash")
+        ))
+
+        # Гладкая кривая
+        fig.add_trace(go.Scatter(
+            x=E, y=I_smooth, mode="lines", name="Синтезированная петля",
+            line=dict(color=INHIBITORS[inh_key]['color'], width=3)
+        ))
+
+        # Пики
+        fig.add_trace(go.Scatter(
+            x=[met["E_pa"], met["E_pc"]], y=[met["I_pa"], met["I_pc"]],
+            mode="markers", name="Пики",
+            marker=dict(color=["#EF4444", "#10B981"], size=12, symbol="diamond")
+        ))
+
+        fig.add_annotation(x=met["E_pa"], y=met["I_pa"], text=f"Oxidation<br>Epa = {met['E_pa']:.2f}В", showarrow=False,
+                           yshift=20, font=dict(color="white"))
+        fig.add_annotation(x=met["E_pc"], y=met["I_pc"], text=f"Reduction<br>Epc = {met['E_pc']:.2f}В", showarrow=False,
+                           yshift=-20, font=dict(color="white"))
+
+        fig.update_layout(
+            title=dict(text=f"<b>Вольтамперограмма: {INHIBITORS[inh_key]['name']} ({concentration} ppm)</b>",
+                       font=dict(size=18, color="white"), x=0.5),
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            height=600, margin=dict(l=60, r=40, t=80, b=60),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.01,
+                        bgcolor="rgba(11, 17, 32, 0.8)", bordercolor="rgba(255,255,255,0.1)", borderwidth=1),
+            xaxis=dict(title="Потенциал E (В)", gridcolor="rgba(255,255,255,0.05)",
+                       zerolinecolor="rgba(255,255,255,0.1)"),
+            yaxis=dict(title="Ток I (А)", gridcolor="rgba(255,255,255,0.05)", zerolinecolor="rgba(255,255,255,0.1)")
+        )
         st.plotly_chart(fig, use_container_width=True)
 
-        export_df = pd.DataFrame(
-            {"Потенциал_В": np.round(E, 5), "Ток_А": np.round(I, 7), "Средний_ток_А": np.round(I_mean, 7),
-             "Стандартное_отклонение_А": np.round(std_dev, 7)})
-        st.download_button(label="📄 Скачать сигнал (.csv)", data=export_df.to_csv(index=False).encode("utf-8"),
-                           file_name=f"cva_{inh_key}_{concentration}ppm_{model_key}_seed{random_seed}.csv",
-                           mime="text/csv")
+    # --- ВКЛАДКА 2: ДОП. ГРАФИКИ ---
+    with tab_extra:
+        r1c1, r1c2 = st.columns(2)
+        r2c1, r2c2 = st.columns(2)
 
-    with right:
-        st.markdown('<div class="section-title">Ключевые параметры</div>', unsafe_allow_html=True)
-        st.metric("I_pa", f"{met['I_pa'] * 1000:.2f} мА")
-        st.metric("I_pc", f"{met['I_pc'] * 1000:.2f} мА")
-        st.metric("ΔE", f"{met['Delta_E']:.3f} В")
-        st.metric("Q", f"{met['Area']:.4f}")
-        st.metric("Статус защиты", met["ProtectionStatus"])
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-title">Рекомендация по дозировке</div>', unsafe_allow_html=True)
+        def format_mini_fig(fig, title):
+            fig.update_layout(
+                title=title, template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=350, margin=dict(l=40, r=20, t=50, b=40),
+                xaxis=dict(gridcolor="rgba(255,255,255,0.05)"), yaxis=dict(gridcolor="rgba(255,255,255,0.05)")
+            )
+            return fig
 
-        if met["ProtectionStatus"] == "Недостаточная защита":
-            st.warning(f"Рекомендуется увеличить концентрацию на +{met['RecommendedDose']} ppm.")
-        elif met["ProtectionStatus"] == "Пограничный режим":
-            st.info(f"Желательно рассмотреть корректировку дозировки на +{met['RecommendedDose']} ppm.")
-        else:
-            st.success("Система находится в рабочей зоне. Корректировка дозировки не требуется.")
 
-# =====================================================
-# ВКЛАДКА 2: Хемоинформатика
-# =====================================================
-with tab_chem:
-    st.markdown("### Хемоинформатический профиль ингибитора")
-    df_desc = get_descriptors(inh_key)
-    c1, c2 = st.columns([1, 2])
+        with r1c1:
+            f1 = go.Figure()
+            f1.add_trace(go.Scatter(x=E_fwd, y=I_noisy[:n_pts], mode="lines", name="Прямой ход",
+                                    line=dict(color="#EF4444", width=1.5)))
+            f1.add_trace(go.Scatter(x=E_bwd, y=I_noisy[n_pts:], mode="lines", name="Обратный ход",
+                                    line=dict(color="#10B981", width=1.5)))
+            st.plotly_chart(format_mini_fig(f1, "Разделение на ветви"), use_container_width=True)
 
-    with c1:
-        st.markdown(f"""
-        <div class="card" style="margin-bottom: 15px;">
-            <p style="margin-bottom: 8px;"><b>Название:</b> {INHIBITORS[inh_key]['name']}</p>
-            <p style="margin-bottom: 8px;"><b>Тип:</b> {INHIBITORS[inh_key]['type']}</p>
-            <p style="margin-bottom: 8px;"><b>Молекулярная масса:</b> {INHIBITORS[inh_key]['mw']}</p>
-            <p style="margin-bottom: 0px;"><b>LogP:</b> {INHIBITORS[inh_key]['logp']}</p>
-        </div>
-        """, unsafe_allow_html=True)
-        st.code(INHIBITORS[inh_key]['smiles'], language="text")
-        st.dataframe(df_desc, use_container_width=True, hide_index=True)
+        with r1c2:
+            f2 = go.Figure()
+            f2.add_trace(go.Scatter(x=time_arr, y=E, mode="lines", line=dict(color="#3B82F6", width=2)))
+            f2.update_yaxes(title="E (В)")
+            f2.update_xaxes(title="t (сек)")
+            st.plotly_chart(format_mini_fig(f2, "Треугольная развертка"), use_container_width=True)
 
-    with c2:
-        radar = go.Figure()
-        radar.add_trace(go.Scatterpolar(
-            r=df_desc["Норм. значение"].tolist() + [df_desc["Норм. значение"].iloc[0]],
-            theta=df_desc["Дескриптор"].tolist() + [df_desc["Дескриптор"].iloc[0]],
-            fill="toself", fillcolor="rgba(37,99,235,0.10)", line=dict(color=INHIBITORS[inh_key]["color"], width=2.2)
-        ))
-        radar.update_layout(paper_bgcolor="rgba(0,0,0,0)", polar=dict(bgcolor="rgba(0,0,0,0)",
-                                                                      radialaxis=dict(visible=True, range=[0, 1],
-                                                                                      gridcolor=PALETTE["grid"])),
-                            showlegend=False, font=dict(color=PALETTE["text"]), height=340)
-        st.plotly_chart(radar, use_container_width=True)
+        with r2c1:
+            f3 = go.Figure()
+            f3.add_trace(
+                go.Scatter(x=time_arr, y=I_noisy, mode="lines", name="Сырой", line=dict(color="rgba(14,165,233,0.5)")))
+            f3.add_trace(go.Scatter(x=time_arr, y=I_smooth, mode="lines", name="Фильтр",
+                                    line=dict(color="#F59E0B", width=2, dash="dash")))
+            st.plotly_chart(format_mini_fig(f3, "Ток от времени"), use_container_width=True)
 
-# =====================================================
-# ВКЛАДКА 3: Лаборатория валидации
-# =====================================================
-with tab_val:
-    st.markdown("### Лаборатория валидации")
+        with r2c2:
+            # Nyquist Plot (Импеданс)
+            theta_z = np.linspace(np.pi, 0, 100)
+            Rs, Rct = 15, met["Rct"]
+            Z_real_semi = Rs + (Rct / 2) + (Rct / 2) * np.cos(theta_z)
+            Z_imag_semi = (Rct / 2) * np.sin(theta_z)
+            Z_real_w = np.linspace(Rs + Rct, Rs + Rct + Rct, 50)
+            Z_imag_w = 1.0 * (Z_real_w - (Rs + Rct))
 
-    # ДОБАВЛЕН РЕЖИМ СРАВНЕНИЯ "ИНГИБИТОРЫ"
-    mode = st.radio("Режим сравнения", ["Ингибиторы", "Концентрации", "Модели", "Циклы"], horizontal=True)
-
-    fig_val = go.Figure()
-
-    if mode == "Ингибиторы":
-        # Сравниваем 4 ингибитора при равных условиях (берем из сайдбара)
-        for k, info in INHIBITORS.items():
-            Ec, Ic, _, _, _ = generate_demo_signal(concentration, k, cycle, model_key, random_seed)
-            fig_val.add_trace(
-                go.Scatter(x=Ec, y=Ic, mode='lines', name=info['name'], line=dict(color=info['color'], width=2.5),
-                           line_shape=line_shape(graph_style)))
-        build_plot(fig_val, title=f"Сравнение ингибиторов ({concentration} ppm, цикл {cycle}, {model_key})", height=500)
-
-    elif mode == "Концентрации":
-        concs = [0, 10, 20, 40, 80]
-        colors = ['#94A3B8', '#38BDF8', '#3B82F6', '#6366F1', '#4C1D95']
-        for idx, c in enumerate(concs):
-            Ec, Ic, _, _, _ = generate_demo_signal(c, inh_key, cycle, model_key, random_seed)
-            fig_val.add_trace(
-                go.Scatter(x=Ec, y=Ic, mode='lines', name=f'{c} ppm', line=dict(color=colors[idx], width=2),
-                           line_shape=line_shape(graph_style)))
-        build_plot(fig_val, title="Влияние концентрации", height=500)
-
-    elif mode == "Модели":
-        for mk, meta in MODELS.items():
-            Ec, Ic, _, _, _ = generate_demo_signal(concentration, inh_key, cycle, mk, random_seed)
-            fig_val.add_trace(go.Scatter(x=Ec, y=Ic, mode='lines', name=mk, line=dict(color=meta["color"], width=2),
-                                         line_shape=line_shape(graph_style)))
-        build_plot(fig_val, title="Сравнение моделей", height=500)
-
-    else:
-        cyc_colors = ['#0EA5E9', '#2563EB', '#4F46E5', '#7C3AED', '#DB2777']
-        for cyc, col in zip([1, 2, 3, 4, 5], cyc_colors):
-            Ec, Ic, _, _, _ = generate_demo_signal(concentration, inh_key, cyc, model_key, random_seed)
-            fig_val.add_trace(go.Scatter(x=Ec, y=Ic, mode='lines', name=f'Цикл {cyc}', line=dict(color=col, width=2),
-                                         line_shape=line_shape(graph_style)))
-        build_plot(fig_val, title="Изменение по циклам", height=500)
-
-    fig_val.update_xaxes(title="Потенциал (В)", showgrid=show_grid)
-    fig_val.update_yaxes(title="Ток (А)", showgrid=show_grid)
-    st.plotly_chart(fig_val, use_container_width=True)
-
-# =====================================================
-# ВКЛАДКА 4: Прикладной эффект
-# =====================================================
-with tab_eco:
-    st.markdown("### Прикладной эффект")
-    e1, e2, e3 = st.columns(3)
-    e1.metric("MAE • Базовая модель", "4.8 ppm")
-    e2.metric("MAE • С аугментацией", "2.1 ppm", delta="-2.7 ppm", delta_color="inverse")
-    e3.metric("R² • С аугментацией", "0.94", delta="+15%")
+            f4 = go.Figure()
+            f4.add_trace(go.Scatter(
+                x=np.concatenate([Z_real_semi, Z_real_w[1:]]),
+                y=np.concatenate([Z_imag_semi, Z_imag_w[1:]]),
+                mode="lines+markers", marker=dict(size=4, color="#8B5CF6")
+            ))
+            f4 = format_mini_fig(f4, "Годограф импеданса (Nyquist)")
+            f4.update_xaxes(title="Z' (Ом)", scaleanchor="y", scaleratio=1)
+            f4.update_yaxes(title="-Z'' (Ом)")
+            st.plotly_chart(f4, use_container_width=True)
